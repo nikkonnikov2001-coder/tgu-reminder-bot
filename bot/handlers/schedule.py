@@ -12,7 +12,7 @@ from bot.database.engine import async_session_factory
 from bot.database.models import Lesson, User
 from bot.database.repo import LessonRepo, UserRepo, AssignmentRepo
 from bot.keyboards.inline import week_navigation_keyboard, update_file_keyboard, refresh_today_keyboard
-from bot.services.calendar_sync import fetch_and_parse, fetch_and_parse_assignments, download_and_parse_file, CalendarError, parse_assignments
+from bot.services.calendar_sync import fetch_and_parse_both, download_and_parse_both, download_and_parse_file, CalendarError
 from bot.services.reminder import schedule_lessons
 from bot.services.deadline_reminder import schedule_assignments
 
@@ -260,7 +260,7 @@ async def cmd_sync(
     await message.answer("⏳ Обновляю расписание...")
 
     try:
-        lessons_data = await fetch_and_parse(user.calendar_url)
+        lessons_data, assignments_data = await fetch_and_parse_both(user.calendar_url)
     except CalendarError as e:
         await message.answer(f"❌ {e}", parse_mode="HTML")
         return
@@ -268,29 +268,23 @@ async def cmd_sync(
         await message.answer(f"❌ Непредвиденная ошибка:\n<code>{e}</code>", parse_mode="HTML")
         return
 
+    # Пары
     lesson_repo = LessonRepo(session)
     count, cancelled = await lesson_repo.upsert_lessons(user.id, lessons_data)
+
+    # Задания
+    from bot.database.models import Assignment as AssignmentModel
+    a_repo = AssignmentRepo(session)
+    task_count, _ = await a_repo.upsert_from_ical(user.id, assignments_data)
     await session.commit()
 
     result = await session.execute(select(Lesson).where(Lesson.user_id == user.id))
-    lessons = list(result.scalars().all())
-    schedule_lessons(scheduler, bot, async_session_factory, lessons, user)
+    schedule_lessons(scheduler, bot, async_session_factory, list(result.scalars().all()), user)
 
-    # Синхронизация заданий
-    task_count = 0
-    try:
-        assignments_data = await fetch_and_parse_assignments(user.calendar_url)
-        a_repo = AssignmentRepo(session)
-        task_count, _ = await a_repo.upsert_from_ical(user.id, assignments_data)
-        await session.commit()
-        from sqlalchemy import select as sa_select
-        from bot.database.models import Assignment
-        a_result = await session.execute(
-            sa_select(Assignment).where(Assignment.user_id == user.id, Assignment.is_done == False)
-        )
-        schedule_assignments(scheduler, bot, async_session_factory, list(a_result.scalars().all()), user)
-    except Exception:
-        pass  # Задания опциональны — не ломаем синк пар
+    a_result = await session.execute(
+        select(AssignmentModel).where(AssignmentModel.user_id == user.id, AssignmentModel.is_done == False)
+    )
+    schedule_assignments(scheduler, bot, async_session_factory, list(a_result.scalars().all()), user)
 
     text = f"✅ Синхронизировано.\nНовых пар: <b>{count}</b>"
     if task_count:

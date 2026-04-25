@@ -11,7 +11,9 @@ from bot.database.engine import async_session_factory
 from bot.database.models import Lesson
 from bot.database.repo import UserRepo, LessonRepo
 from bot.keyboards.inline import timezone_keyboard
-from bot.services.calendar_sync import fetch_and_parse, download_and_parse_file, CalendarError
+from bot.services.calendar_sync import fetch_and_parse_both, download_and_parse_both, download_and_parse_file, CalendarError
+from bot.database.repo import AssignmentRepo
+from bot.services.deadline_reminder import schedule_assignments
 from bot.services.reminder import schedule_lessons
 
 router = Router()
@@ -89,10 +91,11 @@ async def _save_and_schedule(
     scheduler: AsyncIOScheduler,
     bot: Bot,
     lessons_data: list[dict],
+    assignments_data: list[dict],
     calendar_url: str,
 ) -> None:
-    if not lessons_data:
-        await message.answer("⚠️ Календарь получен, но пар не найдено. Проверь файл/ссылку.")
+    if not lessons_data and not assignments_data:
+        await message.answer("⚠️ Календарь получен, но ничего не найдено. Проверь файл/ссылку.")
         return
 
     user_repo = UserRepo(session)
@@ -100,21 +103,33 @@ async def _save_and_schedule(
     user = await user_repo.get_by_telegram_id(message.from_user.id)
 
     lesson_repo = LessonRepo(session)
-    count, _ = await lesson_repo.upsert_lessons(user.id, lessons_data)
+    lesson_count, _ = await lesson_repo.upsert_lessons(user.id, lessons_data)
+
+    a_repo = AssignmentRepo(session)
+    task_count, _ = await a_repo.upsert_from_ical(user.id, assignments_data)
+
     await session.commit()
 
     result = await session.execute(select(Lesson).where(Lesson.user_id == user.id))
-    lessons = list(result.scalars().all())
-    schedule_lessons(scheduler, bot, async_session_factory, lessons, user)
+    schedule_lessons(scheduler, bot, async_session_factory, list(result.scalars().all()), user)
+
+    from bot.database.models import Assignment as AssignmentModel
+    a_result = await session.execute(
+        select(AssignmentModel).where(AssignmentModel.user_id == user.id, AssignmentModel.is_done == False)
+    )
+    schedule_assignments(scheduler, bot, async_session_factory, list(a_result.scalars().all()), user)
 
     await state.clear()
+    summary = f"📅 Пар: <b>{lesson_count}</b>"
+    if task_count:
+        summary += f" · 📝 Заданий: <b>{task_count}</b>"
+
     await message.answer(
-        f"✅ Расписание синхронизировано! Загружено пар: <b>{count}</b>\n\n"
-        f"Команды:\n"
+        f"✅ Расписание синхронизировано!\n{summary}\n\n"
         f"/today — пары на сегодня\n"
-        f"/week — расписание на неделю\n"
+        f"/tasks — задания\n"
         f"/next — ближайшая пара\n"
-        f"/sync — обновить расписание\n"
+        f"/sync — обновить\n"
         f"/settings — настройки",
         parse_mode="HTML",
     )
@@ -136,7 +151,7 @@ async def msg_calendar_url(
     await message.answer("⏳ Загружаю расписание...")
 
     try:
-        lessons_data = await fetch_and_parse(url)
+        lessons_data, assignments_data = await fetch_and_parse_both(url)
     except CalendarError as e:
         await message.answer(f"❌ {e}", parse_mode="HTML")
         return
@@ -144,7 +159,7 @@ async def msg_calendar_url(
         await message.answer(f"❌ Непредвиденная ошибка:\n<code>{e}</code>", parse_mode="HTML")
         return
 
-    await _save_and_schedule(message, state, session, scheduler, bot, lessons_data, url)
+    await _save_and_schedule(message, state, session, scheduler, bot, lessons_data, assignments_data, url)
 
 
 @router.message(OnboardingFSM.waiting_calendar_url, F.document)
@@ -164,12 +179,12 @@ async def msg_calendar_file(
     await message.answer("⏳ Читаю файл расписания...")
 
     try:
-        lessons_data = await download_and_parse_file(bot, doc.file_id)
+        lessons_data, assignments_data = await download_and_parse_both(bot, doc.file_id)
     except CalendarError as e:
         await message.answer(f"❌ {e}", parse_mode="HTML")
         return
 
-    await _save_and_schedule(message, state, session, scheduler, bot, lessons_data, f"file:{doc.file_id}")
+    await _save_and_schedule(message, state, session, scheduler, bot, lessons_data, assignments_data, f"file:{doc.file_id}")
 
 
 @router.message(OnboardingFSM.waiting_calendar_url)
