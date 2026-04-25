@@ -72,6 +72,30 @@ def parse_ical(raw: bytes) -> list[dict]:
     return lessons
 
 
+def parse_assignments(raw: bytes) -> list[dict]:
+    """Парсит VTODO компоненты из iCal."""
+    cal = Calendar.from_ical(raw)
+    assignments = []
+    for component in cal.walk():
+        if component.name != "VTODO":
+            continue
+        uid = str(component.get("UID", ""))
+        summary = str(component.get("SUMMARY", "Без названия"))
+        description = str(component.get("DESCRIPTION", "") or "").strip() or None
+
+        due = component.get("DUE") or component.get("DTEND")
+        deadline_utc = _parse_dt(due.dt) if due else None
+
+        assignments.append({
+            "uid": uid,
+            "subject": summary,
+            "description": description,
+            "deadline_utc": deadline_utc,
+            "is_manual": False,
+        })
+    return assignments
+
+
 class CalendarError(Exception):
     pass
 
@@ -91,6 +115,19 @@ def parse_ical_safe(raw: bytes) -> list[dict]:
         return parse_ical(raw)
     except Exception as e:
         raise CalendarError(f"Ошибка разбора календаря: {e}") from e
+
+
+async def fetch_and_parse_assignments(url: str) -> list[dict]:
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise CalendarError(f"Сервер вернул ошибку {e.response.status_code}") from e
+    except httpx.RequestError as e:
+        raise CalendarError(f"Не удалось подключиться: {e}") from e
+    validate_ical(response.content)
+    return parse_assignments(response.content)
 
 
 async def fetch_and_parse(url: str) -> list[dict]:

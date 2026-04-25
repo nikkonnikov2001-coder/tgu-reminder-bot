@@ -40,6 +40,7 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     lessons: Mapped[list["Lesson"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    assignments: Mapped[list["Assignment"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
 class Lesson(Base):
@@ -57,6 +58,22 @@ class Lesson(Base):
     reminded: Mapped[bool] = mapped_column(Boolean, default=False)
 
     user: Mapped["User"] = relationship(back_populates="lessons")
+
+
+class Assignment(Base):
+    __tablename__ = "assignments"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    uid: Mapped[str | None] = mapped_column(String(512))          # None для ручных
+    subject: Mapped[str] = mapped_column(String(512), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    deadline_utc: Mapped[datetime | None] = mapped_column(DateTime)
+    is_done: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_manual: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="assignments")
 
 
 class Teacher(Base):

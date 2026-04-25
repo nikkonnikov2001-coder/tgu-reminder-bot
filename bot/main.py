@@ -11,7 +11,7 @@ from sqlalchemy import select
 from bot.config import settings
 from bot.database.engine import engine, async_session_factory
 from bot.database.models import Base, Lesson, User
-from bot.handlers import start, schedule, admin, help as help_handler
+from bot.handlers import start, schedule, admin, help as help_handler, assignments
 from bot.handlers import settings as settings_handler
 from bot.middleware import DbSessionMiddleware, SchedulerMiddleware
 from bot.services.autosync import setup_autosync
@@ -41,7 +41,9 @@ async def setup_bot_commands(bot: Bot) -> None:
         BotCommand(command="today",     description="📅 Пары на сегодня"),
         BotCommand(command="week",      description="🗓 Расписание на неделю"),
         BotCommand(command="next",      description="⏭ Ближайшая пара"),
-        BotCommand(command="sync",      description="🔄 Обновить расписание"),
+        BotCommand(command="tasks",     description="📝 Список заданий"),
+        BotCommand(command="addtask",   description="➕ Добавить задание"),
+        BotCommand(command="sync",      description="🔄 Обновить расписание и задания"),
         BotCommand(command="reminders", description="⏰ Настроить время напоминаний"),
         BotCommand(command="settings",  description="⚙️ Сменить часовой пояс"),
         BotCommand(command="stop",      description="🔕 Отключить напоминания"),
@@ -92,7 +94,24 @@ async def main() -> None:
             )
             logger.info("Migration: added reminder_offsets column")
         except Exception:
-            pass  # Колонка уже существует
+            pass
+        try:
+            await conn.execute(__import__("sqlalchemy").text("""
+                CREATE TABLE IF NOT EXISTS assignments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    uid VARCHAR(512),
+                    subject VARCHAR(512) NOT NULL,
+                    description TEXT,
+                    deadline_utc DATETIME,
+                    is_done BOOLEAN NOT NULL DEFAULT 0,
+                    is_manual BOOLEAN NOT NULL DEFAULT 0,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            logger.info("Migration: created assignments table")
+        except Exception:
+            pass
 
     bot = Bot(
         token=settings.bot_token,
@@ -115,6 +134,7 @@ async def main() -> None:
     dp.include_router(start.router)
     dp.include_router(schedule.router)
     dp.include_router(settings_handler.router)
+    dp.include_router(assignments.router)
     dp.include_router(help_handler.router)
     dp.include_router(admin.router)
 

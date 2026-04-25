@@ -10,10 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.database.engine import async_session_factory
 from bot.database.models import Lesson, User
-from bot.database.repo import LessonRepo, UserRepo
+from bot.database.repo import LessonRepo, UserRepo, AssignmentRepo
 from bot.keyboards.inline import week_navigation_keyboard, update_file_keyboard, refresh_today_keyboard
-from bot.services.calendar_sync import fetch_and_parse, download_and_parse_file, CalendarError
+from bot.services.calendar_sync import fetch_and_parse, fetch_and_parse_assignments, download_and_parse_file, CalendarError, parse_assignments
 from bot.services.reminder import schedule_lessons
+from bot.services.deadline_reminder import schedule_assignments
 
 
 class SyncFSM(StatesGroup):
@@ -275,7 +276,25 @@ async def cmd_sync(
     lessons = list(result.scalars().all())
     schedule_lessons(scheduler, bot, async_session_factory, lessons, user)
 
-    text = f"✅ Синхронизировано. Новых пар: <b>{count}</b>"
+    # Синхронизация заданий
+    task_count = 0
+    try:
+        assignments_data = await fetch_and_parse_assignments(user.calendar_url)
+        a_repo = AssignmentRepo(session)
+        task_count, _ = await a_repo.upsert_from_ical(user.id, assignments_data)
+        await session.commit()
+        from sqlalchemy import select as sa_select
+        from bot.database.models import Assignment
+        a_result = await session.execute(
+            sa_select(Assignment).where(Assignment.user_id == user.id, Assignment.is_done == False)
+        )
+        schedule_assignments(scheduler, bot, async_session_factory, list(a_result.scalars().all()), user)
+    except Exception:
+        pass  # Задания опциональны — не ломаем синк пар
+
+    text = f"✅ Синхронизировано.\nНовых пар: <b>{count}</b>"
+    if task_count:
+        text += f" · заданий: <b>{task_count}</b>"
     if cancelled:
         names = "\n".join(f"• {l.subject}" for l in cancelled[:5])
         text += f"\n\n❌ <b>Отменены {len(cancelled)} пар:</b>\n{names}"

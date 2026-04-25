@@ -1,7 +1,7 @@
 from datetime import datetime, date
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
-from bot.database.models import User, Lesson, Teacher
+from bot.database.models import User, Lesson, Teacher, Assignment
 
 
 class UserRepo:
@@ -173,3 +173,81 @@ class TeacherRepo:
             select(Teacher).where(Teacher.name.ilike(f"%{name}%"))
         )
         return result.scalar_one_or_none()
+
+
+class AssignmentRepo:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def upsert_from_ical(self, user_id: int, assignments: list[dict]) -> tuple[int, list[Assignment]]:
+        now = datetime.utcnow()
+        incoming_uids = {a["uid"] for a in assignments if a.get("uid")}
+
+        existing_result = await self.session.execute(
+            select(Assignment).where(Assignment.user_id == user_id, Assignment.is_manual == False)
+        )
+        existing = {a.uid: a for a in existing_result.scalars().all() if a.uid}
+
+        cancelled = [
+            a for uid, a in existing.items()
+            if uid not in incoming_uids and (a.deadline_utc is None or a.deadline_utc > now) and not a.is_done
+        ]
+
+        new_count = 0
+        for data in assignments:
+            uid = data.get("uid")
+            if uid and uid in existing:
+                a = existing[uid]
+                a.subject = data["subject"]
+                a.description = data.get("description")
+                a.deadline_utc = data.get("deadline_utc")
+            else:
+                self.session.add(Assignment(user_id=user_id, **data))
+                new_count += 1
+
+        for a in cancelled:
+            await self.session.delete(a)
+
+        await self.session.flush()
+        return new_count, cancelled
+
+    async def add_manual(self, user_id: int, subject: str, description: str | None, deadline_utc: datetime | None) -> Assignment:
+        a = Assignment(
+            user_id=user_id,
+            subject=subject,
+            description=description,
+            deadline_utc=deadline_utc,
+            is_manual=True,
+        )
+        self.session.add(a)
+        await self.session.flush()
+        return a
+
+    async def get_active(self, user_id: int) -> list[Assignment]:
+        result = await self.session.execute(
+            select(Assignment)
+            .where(Assignment.user_id == user_id, Assignment.is_done == False)
+            .order_by(Assignment.deadline_utc.asc().nullsfirst())
+        )
+        return list(result.scalars().all())
+
+    async def get_by_id(self, assignment_id: int) -> Assignment | None:
+        result = await self.session.execute(select(Assignment).where(Assignment.id == assignment_id))
+        return result.scalar_one_or_none()
+
+    async def mark_done(self, assignment_id: int) -> None:
+        a = await self.get_by_id(assignment_id)
+        if a:
+            a.is_done = True
+            await self.session.flush()
+
+    async def get_upcoming_unreminded(self, user_id: int) -> list[Assignment]:
+        now = datetime.utcnow()
+        result = await self.session.execute(
+            select(Assignment).where(
+                Assignment.user_id == user_id,
+                Assignment.is_done == False,
+                Assignment.deadline_utc > now,
+            )
+        )
+        return list(result.scalars().all())
