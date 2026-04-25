@@ -14,13 +14,51 @@ def _parse_dt(dt_val: Any) -> datetime:
     return datetime(dt_val.year, dt_val.month, dt_val.day, 0, 0, 0)
 
 
+_CONF_HOSTS = (
+    "https://zoom.us",
+    "https://meet.google",
+    "https://teams.microsoft",
+    "https://edu.livedigital.space",
+    "https://livedigital.space",
+    "http://edu.livedigital.space",
+)
+
+
 def _extract_conference_url(description: str | None) -> str | None:
     if not description:
         return None
     for line in description.splitlines():
-        for part in (line.strip(),) + tuple(line.split()):
-            if part.startswith(("https://zoom.us", "https://meet.google", "https://teams.microsoft")):
-                return part
+        for part in line.strip().split():
+            # Убираем суффиксы типа "[1]"
+            clean = part.split("[")[0].rstrip("/")
+            if any(clean.startswith(h) for h in _CONF_HOSTS):
+                return clean
+    return None
+
+
+import re
+_NAME_RE = re.compile(r"^[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?\s[А-ЯЁ][а-яё]+(?:\s[А-ЯЁ][а-яё]+\.?)?$")
+
+
+def _extract_teacher(description: str | None) -> str | None:
+    """Ищет строку вида 'Имя Фамилия' или 'Имя Фамилия Отчество'."""
+    if not description:
+        return None
+    for line in description.splitlines():
+        stripped = line.strip()
+        if _NAME_RE.match(stripped):
+            return stripped
+    return None
+
+
+def _extract_lesson_type(description: str | None) -> str | None:
+    """Извлекает тип занятия из строк вида _Практика_, _Лекция_ и т.д."""
+    if not description:
+        return None
+    for line in description.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("_") and stripped.endswith("_") and len(stripped) > 2:
+            return stripped.strip("_")
     return None
 
 
@@ -68,16 +106,15 @@ def parse_both(raw: bytes) -> tuple[list[dict], list[dict]]:
                     continue
                 end_utc = _parse_dt(dtend.dt)
 
-                teacher_name = None
-                for line in description.splitlines():
-                    stripped = line.strip()
-                    if stripped and not stripped.startswith("http"):
-                        teacher_name = stripped
-                        break
+                teacher_name = _extract_teacher(description)
+                lesson_type = _extract_lesson_type(description)
+                subject = summary
+                if lesson_type:
+                    subject = f"{summary} ({lesson_type})"
 
                 lessons.append({
                     "uid": uid,
-                    "subject": summary,
+                    "subject": subject,
                     "teacher_name": teacher_name,
                     "start_dt_utc": start_utc,
                     "end_dt_utc": end_utc,
